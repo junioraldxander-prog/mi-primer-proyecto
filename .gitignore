@@ -1,207 +1,177 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[codz]
-*$py.class
+#!/usr/bin/env python3
+"""
+Script para integrar Coverity Scan en CI/CD
+Automatiza la descarga, análisis y envío de resultados a Coverity Scan
+"""
 
-# C extensions
-*.so
+import os
+import sys
+import subprocess
+import shutil
+import argparse
+from pathlib import Path
 
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+class CoverityScanCI:
+    def __init__(self, project_name, token, email):
+        self.project_name = project_name
+        self.token = token
+        self.email = email
+        self.coverity_dir = Path("cov-analysis")
+        self.build_dir = Path("cov-int")
+        
+    def download_coverity_tools(self):
+        """Descarga las herramientas de Coverity si no existen"""
+        print("📦 Verificando herramientas de Coverity...")
+        
+        if self.coverity_dir.exists():
+            print("✓ Herramientas ya descargadas")
+            return True
+            
+        print("⬇️  Descargando Coverity Scan Tools...")
+        download_url = f"https://scan.coverity.com/download/linux64"
+        
+        cmd = [
+            "wget", download_url,
+            "--post-data", f"token={self.token}&project={self.project_name}",
+            "-O", "coverity_tool.tar.gz"
+        ]
+        
+        try:
+            subprocess.run(cmd, check=True)
+            subprocess.run(["tar", "xzf", "coverity_tool.tar.gz"], check=True)
+            
+            # Renombrar directorio extraído
+            extracted = list(Path(".").glob("cov-analysis-linux64-*"))[0]
+            extracted.rename(self.coverity_dir)
+            
+            print("✓ Herramientas descargadas correctamente")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Error descargando herramientas: {e}")
+            return False
+    
+    def run_coverity_build(self, build_command=None):
+        """Ejecuta el análisis de Coverity"""
+        print("\n🔍 Ejecutando análisis de Coverity...")
+        
+        cov_build = self.coverity_dir / "bin" / "cov-build"
+        
+        # Comando por defecto para Python
+        if not build_command:
+            build_command = "python -m py_compile $(find . -name '*.py')"
+        
+        cmd = [
+            str(cov_build),
+            "--dir", str(self.build_dir),
+            "--no-command",
+            "--fs-capture-search", "."
+        ]
+        
+        try:
+            # Limpiar build anterior
+            if self.build_dir.exists():
+                shutil.rmtree(self.build_dir)
+            
+            subprocess.run(cmd, check=True)
+            print("✓ Análisis completado")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Error en análisis: {e}")
+            return False
+    
+    def submit_results(self, version="1.0", description="Automated scan"):
+        """Envía los resultados a Coverity Scan"""
+        print("\n📤 Enviando resultados a Coverity Scan...")
+        
+        # Comprimir resultados
+        tar_file = f"{self.project_name}.tar.gz"
+        subprocess.run(
+            ["tar", "czf", tar_file, "-C", ".", "cov-int"],
+            check=True
+        )
+        
+        # Enviar a Coverity
+        upload_url = f"https://scan.coverity.com/builds?project={self.project_name}"
+        
+        cmd = [
+            "curl", "--form", f"token={self.token}",
+            "--form", f"email={self.email}",
+            "--form", f"file=@{tar_file}",
+            "--form", f"version={version}",
+            "--form", f"description={description}",
+            upload_url
+        ]
+        
+        try:
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            print("✓ Resultados enviados correctamente")
+            print(f"Respuesta: {result.stdout}")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Error enviando resultados: {e}")
+            print(f"Salida: {e.stderr}")
+            return False
+    
+    def run_full_scan(self, version="1.0", description="CI/CD Scan"):
+        """Ejecuta el flujo completo de Coverity"""
+        print(f"🚀 Iniciando Coverity Scan para {self.project_name}\n")
+        
+        if not self.download_coverity_tools():
+            return False
+            
+        if not self.run_coverity_build():
+            return False
+            
+        if not self.submit_results(version, description):
+            return False
+        
+        print("\n✅ ¡Scan completado exitosamente!")
+        return True
 
-# PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
+def main():
+    parser = argparse.ArgumentParser(
+        description="Script de integración de Coverity Scan para CI/CD"
+    )
+    parser.add_argument(
+        "--project", 
+        required=True,
+        help="Nombre del proyecto en Coverity Scan"
+    )
+    parser.add_argument(
+        "--token",
+        required=True,
+        help="Token de Coverity Scan (o usar variable COVERITY_TOKEN)"
+    )
+    parser.add_argument(
+        "--email",
+        required=True,
+        help="Email para notificaciones"
+    )
+    parser.add_argument(
+        "--version",
+        default=os.getenv("CI_COMMIT_SHA", "1.0")[:8],
+        help="Versión del build (default: commit SHA)"
+    )
+    parser.add_argument(
+        "--description",
+        default="Automated CI/CD Scan",
+        help="Descripción del scan"
+    )
+    
+    args = parser.parse_args()
+    
+    # Permitir token desde variable de entorno
+    token = args.token or os.getenv("COVERITY_TOKEN")
+    if not token:
+        print("❌ Error: Se requiere --token o variable COVERITY_TOKEN")
+        sys.exit(1)
+    
+    scanner = CoverityScanCI(args.project, token, args.email)
+    success = scanner.run_full_scan(args.version, args.description)
+    
+    sys.exit(0 if success else 1)
 
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py.cover
-.hypothesis/
-.pytest_cache/
-cover/
 
-# Translations
-*.mo
-*.pot
-
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-.pybuilder/
-target/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
-
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-#Pipfile.lock
-
-# UV
-#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#uv.lock
-
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-#poetry.lock
-#poetry.toml
-
-# pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#   pdm recommends including project-wide configuration in pdm.toml, but excluding .pdm-python.
-#   https://pdm-project.org/en/latest/usage/project/#working-with-version-control
-#pdm.lock
-#pdm.toml
-.pdm-python
-.pdm-build/
-
-# pixi
-#   Similar to Pipfile.lock, it is generally recommended to include pixi.lock in version control.
-#pixi.lock
-#   Pixi creates a virtual environment in the .pixi directory, just like venv module creates one
-#   in the .venv directory. It is recommended not to include this directory in version control.
-.pixi
-
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath parsed files
-*.sage.py
-
-# Environments
-.env
-.envrc
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Pyre type checker
-.pyre/
-
-# pytype static type analyzer
-.pytype/
-
-# Cython debug symbols
-cython_debug/
-
-# PyCharm
-#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#  and can be added to the global gitignore or merged into this file.  For a more nuclear
-#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#.idea/
-
-# Abstra
-# Abstra is an AI-powered process automation framework.
-# Ignore directories containing user credentials, local state, and settings.
-# Learn more at https://abstra.io/docs
-.abstra/
-
-# Visual Studio Code
-#  Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
-#  that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
-#  and can be added to the global gitignore or merged into this file. However, if you prefer, 
-#  you could uncomment the following to ignore the entire vscode folder
-# .vscode/
-
-# Ruff stuff:
-.ruff_cache/
-
-# PyPI configuration file
-.pypirc
-
-# Cursor
-#  Cursor is an AI-powered code editor. `.cursorignore` specifies files/directories to
-#  exclude from AI features like autocomplete and code analysis. Recommended for sensitive data
-#  refer to https://docs.cursor.com/context/ignore-files
-.cursorignore
-.cursorindexingignore
-
-# Marimo
-marimo/_static/
-marimo/_lsp/
-__marimo__/
+if __name__ == "__main__":
+    main()
