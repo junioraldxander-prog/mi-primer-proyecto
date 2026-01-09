@@ -1,177 +1,77 @@
-#!/usr/bin/env python3
-"""
-Script para integrar Coverity Scan en CI/CD
-Automatiza la descarga, análisis y envío de resultados a Coverity Scan
-"""
-
+import re
 import os
-import sys
-import subprocess
-import shutil
-import argparse
-from pathlib import Path
 
-class CoverityScanCI:
-    def __init__(self, project_name, token, email):
-        self.project_name = project_name
-        self.token = token
-        self.email = email
-        self.coverity_dir = Path("cov-analysis")
-        self.build_dir = Path("cov-int")
-        
-    def download_coverity_tools(self):
-        """Descarga las herramientas de Coverity si no existen"""
-        print("📦 Verificando herramientas de Coverity...")
-        
-        if self.coverity_dir.exists():
-            print("✓ Herramientas ya descargadas")
-            return True
-            
-        print("⬇️  Descargando Coverity Scan Tools...")
-        download_url = f"https://scan.coverity.com/download/linux64"
-        
-        cmd = [
-            "wget", download_url,
-            "--post-data", f"token={self.token}&project={self.project_name}",
-            "-O", "coverity_tool.tar.gz"
-        ]
-        
-        try:
-            subprocess.run(cmd, check=True)
-            subprocess.run(["tar", "xzf", "coverity_tool.tar.gz"], check=True)
-            
-            # Renombrar directorio extraído
-            extracted = list(Path(".").glob("cov-analysis-linux64-*"))[0]
-            extracted.rename(self.coverity_dir)
-            
-            print("✓ Herramientas descargadas correctamente")
-            return True
-        except subprocess.CalledProcessError as e:
-            print(f"❌ Error descargando herramientas: {e}")
-            return False
-    
-    def run_coverity_build(self, build_command=None):
-        """Ejecuta el análisis de Coverity"""
-        print("\n🔍 Ejecutando análisis de Coverity...")
-        
-        cov_build = self.coverity_dir / "bin" / "cov-build"
-        
-        # Comando por defecto para Python
-        if not build_command:
-            build_command = "python -m py_compile $(find . -name '*.py')"
-        
-        cmd = [
-            str(cov_build),
-            "--dir", str(self.build_dir),
-            "--no-command",
-            "--fs-capture-search", "."
-        ]
-        
-        try:
-            # Limpiar build anterior
-            if self.build_dir.exists():
-                shutil.rmtree(self.build_dir)
-            
-            subprocess.run(cmd, check=True)
-            print("✓ Análisis completado")
-            return True
-        except subprocess.CalledProcessError as e:
-            print(f"❌ Error en análisis: {e}")
-            return False
-    
-    def submit_results(self, version="1.0", description="Automated scan"):
-        """Envía los resultados a Coverity Scan"""
-        print("\n📤 Enviando resultados a Coverity Scan...")
-        
-        # Comprimir resultados
-        tar_file = f"{self.project_name}.tar.gz"
-        subprocess.run(
-            ["tar", "czf", tar_file, "-C", ".", "cov-int"],
-            check=True
-        )
-        
-        # Enviar a Coverity
-        upload_url = f"https://scan.coverity.com/builds?project={self.project_name}"
-        
-        cmd = [
-            "curl", "--form", f"token={self.token}",
-            "--form", f"email={self.email}",
-            "--form", f"file=@{tar_file}",
-            "--form", f"version={version}",
-            "--form", f"description={description}",
-            upload_url
-        ]
-        
-        try:
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-            print("✓ Resultados enviados correctamente")
-            print(f"Respuesta: {result.stdout}")
-            return True
-        except subprocess.CalledProcessError as e:
-            print(f"❌ Error enviando resultados: {e}")
-            print(f"Salida: {e.stderr}")
-            return False
-    
-    def run_full_scan(self, version="1.0", description="CI/CD Scan"):
-        """Ejecuta el flujo completo de Coverity"""
-        print(f"🚀 Iniciando Coverity Scan para {self.project_name}\n")
-        
-        if not self.download_coverity_tools():
-            return False
-            
-        if not self.run_coverity_build():
-            return False
-            
-        if not self.submit_results(version, description):
-            return False
-        
-        print("\n✅ ¡Scan completado exitosamente!")
-        return True
+def analyze_source_code(file_path):
+    # Definición de reglas de seguridad (Patrones de vulnerabilidad)
+    rules = [
+        {
+            "id": "SEC-001",
+            "name": "Hardcoded API Key",
+            "pattern": r'(?i)(api_key|secret|password|token)\s*=\s*["\'][a-zA-Z0-9]{10,}["\']',
+            "severity": "HIGH"
+        },
+        {
+            "id": "SEC-002",
+            "name": "SQL Injection Risk",
+            "pattern": r'\.execute\(f?["\'].*\{.*\}["\']\)',
+            "severity": "CRITICAL"
+        },
+        {
+            "id": "SEC-003",
+            "name": "Insecure Function (eval)",
+            "pattern": r'\beval\(.*\)',
+            "severity": "MEDIUM"
+        },
+        {
+            "id": "SEC-004",
+            "name": "Insecure Deserialization (pickle)",
+            "pattern": r'import\s+pickle|pickle\.loads\(',
+            "severity": "HIGH"
+        }
+    ]
 
+    findings = []
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Script de integración de Coverity Scan para CI/CD"
-    )
-    parser.add_argument(
-        "--project", 
-        required=True,
-        help="Nombre del proyecto en Coverity Scan"
-    )
-    parser.add_argument(
-        "--token",
-        required=True,
-        help="Token de Coverity Scan (o usar variable COVERITY_TOKEN)"
-    )
-    parser.add_argument(
-        "--email",
-        required=True,
-        help="Email para notificaciones"
-    )
-    parser.add_argument(
-        "--version",
-        default=os.getenv("CI_COMMIT_SHA", "1.0")[:8],
-        help="Versión del build (default: commit SHA)"
-    )
-    parser.add_argument(
-        "--description",
-        default="Automated CI/CD Scan",
-        help="Descripción del scan"
-    )
-    
-    args = parser.parse_args()
-    
-    # Permitir token desde variable de entorno
-    token = args.token or os.getenv("COVERITY_TOKEN")
-    if not token:
-        print("❌ Error: Se requiere --token o variable COVERITY_TOKEN")
-        sys.exit(1)
-    
-    scanner = CoverityScanCI(args.project, token, args.email)
-    success = scanner.run_full_scan(args.version, args.description)
-    
-    sys.exit(0 if success else 1)
+    try:
+        with open(file_path, 'r', encoding='utf-8') as file:
+            lines = file.readlines()
+            
+            for line_num, content in enumerate(lines, 1):
+                for rule in rules:
+                    if re.search(rule["pattern"], content):
+                        findings.append({
+                            "line": line_num,
+                            "rule_id": rule["id"],
+                            "issue": rule["name"],
+                            "severity": rule["severity"],
+                            "code": content.strip()
+                        })
+    except Exception as e:
+        print(f"Error reading {file_path}: {e}")
 
+    return findings
 
+def print_report(findings):
+    if not findings:
+        print("✅ No se encontraron vulnerabilidades evidentes.")
+        return
+
+    print(f"{'LINE':<6} | {'SEVERITY':<10} | {'ISSUE':<25} | {'CODE'}")
+    print("-" * 80)
+    for f in findings:
+        print(f"{f['line']:<6} | {f['severity']:<10} | {f['issue']:<25} | {f['code']}")
+
+# Ejemplo de ejecución
 if __name__ == "__main__":
-    main()
+    # Supongamos que analizamos este mismo archivo o uno de prueba
+    test_file = "vulnerable_script.py"
+    
+    # Creamos un archivo de prueba rápido para demostrarlo
+    with open(test_file, "w") as f:
+        f.write("api_key = 'AIzaSyA123456789'\n")
+        f.write("cursor.execute(f'SELECT * FROM users WHERE id = {user_id}')\n")
+        f.write("data = eval(input())\n")
+
+    print(f"--- Analizando: {test_file} ---")
+    results = analyze_source_code(test_file)
+    print_report(results)
